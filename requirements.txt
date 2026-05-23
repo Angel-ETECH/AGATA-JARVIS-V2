@@ -5,6 +5,9 @@ pillow
 requests
 beautifulsoup4
 duckduckgo-search
+ddgs
+colorthief
+python-docx
 playwright          
 pyautogui
 pyperclip

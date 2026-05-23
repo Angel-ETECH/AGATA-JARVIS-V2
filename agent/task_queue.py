@@ -68,7 +68,7 @@ class TaskQueue:
         self._running = False
         with self._condition:
             self._condition.notify_all()
-        print("[TaskQueue] 🔴 Stopped")
+        print("[TaskQueue] [STOP] Stopped")
 
     def submit(
         self,

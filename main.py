@@ -6,6 +6,9 @@ import sys
 import traceback
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 import sounddevice as sd
 from google import genai
 from google.genai import types
@@ -31,6 +34,8 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
+from actions.agata_creator      import agata_create, list_palettes
+from actions.spotify_control    import spotify_control
 
 
 def get_base_dir():
@@ -42,6 +47,7 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
+AGATA_PROMPT    = BASE_DIR / "core" / "agata_prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
@@ -59,6 +65,7 @@ def _load_system_prompt() -> str:
     except Exception:
         return (
             "You are JARVIS, Tony Stark's AI assistant. "
+            "You speak and respond in Spanish. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -370,6 +377,23 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "spotify_control",
+        "description": (
+            "Controls Spotify: search and play songs, pause, resume, skip tracks, adjust volume. "
+            "Use this for ANY music/song request. "
+            "Examples: 'pon Despacito en Spotify', 'reproduce musica de Coldplay', 'pausa la musica', "
+            "'siguiente cancion', 'sube el volumen de Spotify'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "play | pause | resume | next | previous | volume_up | volume_down (default: play)"},
+                "query":  {"type": "STRING", "description": "Song name or artist to search and play"},
+            },
+            "required": []
+        }
+    },
+    {
         "name": "shutdown_jarvis",
         "description": (
             "Shuts down the assistant completely. "
@@ -478,6 +502,71 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "toggle_panel",
+        "description": (
+            "Muestra u oculta el panel de interfaz de JARVIS (chat, subida de archivos, comandos). "
+            "Usalo cuando el usuario pida ver/ocultar el chat, subir un archivo, "
+            "o interactuar con la interfaz visual. "
+            "Ejemplos: 'muestrame el chat', 'quiero subir un archivo', "
+            "'oculta los paneles', 'muestra la interfaz', 'abre el cargador de archivos', "
+            "'cierra el panel lateral'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "show_chat | show_files | show_all | hide_all"
+                },
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "switch_persona",
+        "description": (
+            "Changes the assistant's personality and voice. "
+            "Use when the user calls 'Agata' or 'Jarvis' by name. "
+            "Switches to Agata (female, designer, elegant) or Jarvis (male, technical, direct). "
+            "The UI colors, voice, and name will change automatically. "
+            "Examples: 'Agata!', 'Jarvis!', 'switch to Agata', 'change to Jarvis'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "persona": {
+                    "type": "STRING",
+                    "description": "agata | jarvis"
+                },
+            },
+            "required": ["persona"]
+        }
+    },
+    {
+        "name": "agata_create",
+        "description": (
+            "Creates beautifully designed Word documents or PowerPoint presentations. "
+            "ONLY use when Agata persona is active. "
+            "Generates content with DeepSeek/OpenCode AI and applies professional design. "
+            "Supports color palettes: elegant, pastel, corporativo, moderno, rosa, nordico."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "type": {"type": "STRING", "description": "word | ppt (default: word)"},
+                "title": {"type": "STRING", "description": "Document/presentation title"},
+                "topic": {"type": "STRING", "description": "Topic or description of content to generate"},
+                "palette": {"type": "STRING", "description": "elegant | pastel | corporativo | moderno | rosa | nordico (default: elegant)"},
+            },
+            "required": ["title", "topic"]
+        }
+    },
+    {
+        "name": "list_palettes",
+        "description": "Shows available design color palettes for document creation (Agata feature).",
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
+    },
 ]
 
 class JarvisLive:
@@ -492,6 +581,8 @@ class JarvisLive:
         self._speaking_lock = threading.Lock()
         self.ui.on_text_command = self._on_text_command
         self._turn_done_event: asyncio.Event | None = None
+        self._persona       = "jarvis"
+        self._reconnect     = False
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -533,7 +624,16 @@ class JarvisLive:
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
-        sys_prompt = _load_system_prompt()
+
+        if self._persona == "agata":
+            try:
+                sys_prompt = AGATA_PROMPT.read_text(encoding="utf-8")
+            except Exception:
+                sys_prompt = _load_system_prompt()
+            voice_name = "Kore"
+        else:
+            sys_prompt = _load_system_prompt()
+            voice_name = "Charon"
 
         now      = datetime.now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -554,11 +654,10 @@ class JarvisLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
-            session_resumption=types.SessionResumptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=voice_name
                     )
                 )
             ),
@@ -568,7 +667,7 @@ class JarvisLive:
         name = fc.name
         args = dict(fc.args or {})
 
-        print(f"[JARVIS] 🔧 {name}  {args}")
+        print(f"[JARVIS] [TOOL] {name}  {args}")
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
@@ -577,7 +676,7 @@ class JarvisLive:
             value    = args.get("value", "")
             if key and value:
                 update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                print(f"[Memory] [SAVE] save_memory: {category}/{key} = {value}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -673,9 +772,58 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "spotify_control":
+                r = await loop.run_in_executor(None, lambda: spotify_control(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
+
+            elif name == "toggle_panel":
+                action = args.get("action", "show_all")
+                self.ui.toggle_panel(action)
+                result = f"Panel {action}."
+                if action == "show_chat":
+                    self.speak("Chat abierto, senor. Escribe lo que necesites.")
+                elif action == "show_files":
+                    self.speak("Cargador de archivos listo, senor.")
+                elif action == "hide_all":
+                    self.speak("Paneles ocultos, senor.")
+
+            elif name == "switch_persona":
+                new_persona = args.get("persona", "jarvis")
+                if new_persona not in ("jarvis", "agata"):
+                    result = f"Persona invalida: {new_persona}. Usa jarvis o agata."
+                else:
+                    self._persona = new_persona
+                    self.ui.set_persona(new_persona)
+                    if new_persona == "agata":
+                        self.ui.write_log("SYS: Agata activada. Cambiando voz...")
+                        result = "Agata activada."
+                        self.speak("Agata en linea, senor. Dejame crear algo hermoso para ti.")
+                    else:
+                        self.ui.write_log("SYS: JARVIS reactivado.")
+                        result = "JARVIS activado."
+                        self.speak("JARVIS en linea, senor.")
+                    self._reconnect = True
+
+            elif name == "agata_create":
+                args["api_key"] = _get_api_key()
+                doc_type = args.get("type", "word")
+                title = args.get("title", "documento")
+                self.ui.write_log(f"[Agata] Iniciando {doc_type.upper()} '{title}' en segundo plano...")
+                self.speak(f"Dejame crear tu {doc_type} sobre {title} en segundo plano, senor. Sigue hablando mientras trabajo.")
+                threading.Thread(
+                    target=agata_create,
+                    kwargs={"parameters": args, "player": self.ui, "speak": self.speak},
+                    daemon=True
+                ).start()
+                result = f"Creando {doc_type} '{title}' en segundo plano."
+
+            elif name == "list_palettes":
+                r = list_palettes(player=self.ui)
+                result = r or "Done."
+
             elif name == "shutdown_jarvis":
-                self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
+                self.ui.write_log("SYS: Apagado solicitado.")
+                self.speak("Adios, senor.")
                 def _shutdown():
                     import time, os
                     time.sleep(1)
@@ -693,7 +841,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        print(f"[JARVIS] [DONE] {name} -> {str(result)[:80]}")
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -705,18 +853,22 @@ class JarvisLive:
             await self.session.send_realtime_input(media=msg)
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
+        print("[JARVIS] [MIC] Mic started")
         loop = asyncio.get_event_loop()
+
+        def _enqueue(data):
+            try:
+                self.out_queue.put_nowait(
+                    {"data": data, "mime_type": "audio/pcm"}
+                )
+            except asyncio.QueueFull:
+                pass
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted:
-                data = indata.tobytes()
-                loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
-                )
+                loop.call_soon_threadsafe(_enqueue, indata.tobytes())
 
         try:
             with sd.InputStream(
@@ -726,15 +878,15 @@ class JarvisLive:
                 blocksize=CHUNK_SIZE,
                 callback=callback,
             ):
-                print("[JARVIS] 🎤 Mic stream open")
+                print("[JARVIS] [MIC] Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
-            print(f"[JARVIS] ❌ Mic: {e}")
+            print(f"[JARVIS] [ERR] Mic: {e}")
             raise
 
     async def _receive_audio(self):
-        print("[JARVIS] 👂 Recv started")
+        print("[JARVIS] [RECV] Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -770,25 +922,29 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Jarvis: {full_out}")
+                                prefix = "Agata:" if self._persona == "agata" else "Jarvis:"
+                                self.ui.write_log(f"{prefix} {full_out}")
                             out_buf = []
 
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                            print(f"[JARVIS] [CALL] {fc.name}")
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
+                        if self._reconnect:
+                            print("[JARVIS] [RECONN] Persona changed, reconnecting...")
+                            raise ConnectionError("persona_switch")
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            print(f"[JARVIS] [ERR] Recv: {e}")
             traceback.print_exc()
             raise
 
     async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+        print("[JARVIS] [PLAY] Play started")
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
@@ -817,7 +973,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
-            print(f"[JARVIS] ❌ Play: {e}")
+            print(f"[JARVIS] [ERR] Play: {e}")
             raise
         finally:
             self.set_speaking(False)
@@ -830,9 +986,10 @@ class JarvisLive:
             http_options={"api_version": "v1beta"}
         )
 
+        backoff = 3
         while True:
             try:
-                print("[JARVIS] 🔌 Connecting...")
+                print("[JARVIS] [CONN] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -846,9 +1003,11 @@ class JarvisLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] ✅ Connected.")
+                    print("[JARVIS] [OK] Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: JARVIS online.")
+                    name = "AGATA" if self._persona == "agata" else "JARVIS"
+                    self.ui.write_log(f"SYS: {name} en linea.")
+                    backoff = 3
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
@@ -856,12 +1015,18 @@ class JarvisLive:
                     tg.create_task(self._play_audio())
 
             except Exception as e:
-                print(f"[JARVIS] ⚠️ {e}")
-                traceback.print_exc()
+                msg = str(e)
+                if "1008" in msg or "policy violation" in msg:
+                    print(f"[JARVIS] [API] Model error: {msg[:120]}")
+                else:
+                    print(f"[JARVIS] [WARN] {e}")
+                    traceback.print_exc()
             self.set_speaking(False)
+            self._reconnect = False
             self.ui.set_state("THINKING")
-            print("[JARVIS] 🔄 Reconnecting in 3s...")
-            await asyncio.sleep(3)
+            print(f"[JARVIS] [RETRY] Reconnecting in {backoff}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.5, 30)
 
 def main():
     ui = JarvisUI("face.png")
@@ -872,7 +1037,7 @@ def main():
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
-            print("\n🔴 Shutting down...")
+            print("\n[SHUTDOWN] Apagando...")
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()
