@@ -9,6 +9,12 @@ import time
 import random
 from pathlib import Path
 
+from core.paths import BASE_DIR, LONG_TERM_MEMORY_PATH
+from core.config import get_api_key, get_config, get_os
+from core.logging import get_logger
+
+log = get_logger("jarvis.computer_control")
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -22,29 +28,6 @@ try:
     _PYPERCLIP = True
 except ImportError:
     _PYPERCLIP = False
-
-def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-_BASE         = _base_dir()
-_CONFIG_PATH  = _BASE / "config" / "api_keys.json"
-_MEMORY_PATH  = _BASE / "memory" / "long_term.json"
-
-def _load_config() -> dict:
-    try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
-
-
-def _get_api_key() -> str:
-    return _load_config().get("gemini_api_key", "")
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),
@@ -135,8 +118,8 @@ def _random_data(data_type: str) -> str:
 def _user_profile() -> dict:
     """Read identity fields from long-term memory."""
     try:
-        if _MEMORY_PATH.exists():
-            data     = json.loads(_MEMORY_PATH.read_text(encoding="utf-8"))
+        if LONG_TERM_MEMORY_PATH.exists():
+            data     = json.loads(LONG_TERM_MEMORY_PATH.read_text(encoding="utf-8"))
             identity = data.get("identity", {})
             return {k: v.get("value", "") for k, v in identity.items()}
     except Exception:
@@ -242,7 +225,7 @@ def _clear_field() -> str:
     return "Field cleared"
 
 def _focus_window(title: str) -> str:
-    os_name = _get_os()
+    os_name = get_os()
 
     if os_name == "windows":
         try:
@@ -297,7 +280,7 @@ def _focus_window(title: str) -> str:
     return f"focus_window: unknown OS '{os_name}'"
 
 def _screen_find(description: str) -> tuple[int, int] | None:
-    api_key = _get_api_key()
+    api_key = get_api_key()
     if not api_key:
         print("[ComputerControl] ⚠️ No API key for screen_find")
         return None

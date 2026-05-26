@@ -95,12 +95,16 @@ def _call_ollama(prompt: str, max_tokens: int = 4000) -> str:
 
 
 def _call_gemini_fast(prompt: str, api_key: str) -> str:
-    import google.generativeai as genai_fast
+    from core.config import gemini_generate
+    from core.ai_providers import generate_gemini_cli
     try:
-        genai_fast.configure(api_key=api_key)
-        model = genai_fast.GenerativeModel("gemini-2.0-flash")
-        resp = model.generate_content(prompt, generation_config={"max_output_tokens": 2000})
-        return resp.text
+        cli_result = generate_gemini_cli(prompt, max_tokens=2000)
+        if cli_result and not cli_result.startswith("[Gemini CLI"):
+            return cli_result
+    except Exception:
+        pass
+    try:
+        return gemini_generate(prompt, model="gemini-2.0-flash", max_tokens=2000)
     except Exception as e:
         return f"[Gemini Fast Error]: {str(e)[:200]}"
 
@@ -145,7 +149,7 @@ def _design_word(content: str, title: str, palette: str, player=None, speak=None
         from docx.oxml.ns import qn, nsdecls
         from docx.oxml import parse_xml
     except ImportError:
-        return "python-docx no esta instalado. Ejecuta: pip install python-docx"
+        raise ImportError("python-docx no esta instalado. Ejecuta: pip install python-docx")
 
     from .utils_diseno import buscar_y_descargar_imagen
 
@@ -258,7 +262,7 @@ def _design_word(content: str, title: str, palette: str, player=None, speak=None
         elif line.startswith("[IMAGE:") or line.startswith("[IMAGEN:"):
             kw_match = re.search(r"\[(?:IMAGE|IMAGEN):\s*(.+?)\]", line, re.IGNORECASE)
             if kw_match and speak:
-                speak(f"Buscando imagen para el documento...")
+                pass
             if kw_match:
                 keyword = kw_match.group(1).strip()
                 player.write_log(f"[Agata] Buscando imagen: {keyword}")
@@ -476,7 +480,7 @@ def _design_ppt(content: str, title: str, palette: str, player=None, speak=None)
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN
     except ImportError:
-        return "python-pptx no esta instalado. Ejecuta: pip install python-pptx"
+        raise ImportError("python-pptx no esta instalado. Ejecuta: pip install python-pptx")
 
     from .utils_diseno import buscar_y_descargar_imagen, analizar_paleta_y_brillo
 
@@ -494,6 +498,10 @@ def _design_ppt(content: str, title: str, palette: str, player=None, speak=None)
             if srgb is not None:
                 alpha_attr = qn('a:alpha')
                 srgb.set(alpha_attr, '50000')
+        else:
+            srgb = sp_el.find('.//' + qn('a:srgbClr'))
+            if srgb is not None:
+                srgb.set(qn('a:alpha'), '50000')
         return ov
 
     _ensure_folder()
@@ -512,7 +520,7 @@ def _design_ppt(content: str, title: str, palette: str, player=None, speak=None)
 
     # ── SLIDE 0: TITLE SLIDE ──
     if speak:
-        speak("Buscando imagen para la portada...")
+        pass
     title_keyword = f"{title} abstract technology background"
     title_image = buscar_y_descargar_imagen(title_keyword)
     title_info = analizar_paleta_y_brillo(title_image) if title_image else {
@@ -558,7 +566,7 @@ def _design_ppt(content: str, title: str, palette: str, player=None, speak=None)
     # ── CONTENT SLIDES ──
     for slide_idx, sd in enumerate(slides_data):
         if speak and slide_idx % 3 == 0:
-            speak(f"Disenando diapositiva {slide_idx + 1} de {len(slides_data)}...")
+            pass
 
         player.write_log(f"[Agata] Buscando imagen para: {sd['keyword'][:60]}")
         img_path = buscar_y_descargar_imagen(sd["keyword"])
@@ -696,11 +704,14 @@ def _hex_to_rgb(h: str) -> tuple:
 
 
 def agata_create(parameters: dict, player=None, speak=None):
-    doc_type = parameters.get("type", "word")
+    doc_type = parameters.get("type", "word").lower()
     title = parameters.get("title", "Documento Agata")
     topic = parameters.get("topic", "")
     palette = parameters.get("palette", "elegant")
     api_key = parameters.get("api_key", "")
+
+    if doc_type not in ("word", "ppt"):
+        doc_type = "word"
 
     if not topic:
         return "Necesito un tema (topic) para crear el documento. Por favor, dime de que quieres que trate."
@@ -763,7 +774,7 @@ def agata_create(parameters: dict, player=None, speak=None):
     if content.startswith("[OpenCode") or content.startswith("[DeepSeek"):
         player.write_log(f"[Agata] OpenCode fallo: {content[:120]}. Usando Ollama (phi:2.7b)...")
         if speak:
-            speak("OpenCode no responde, usando mi cerebro local Ollama, senor...")
+            pass
         content = _call_ollama(prompt, max_tokens=4000)
 
     if content.startswith("[Ollama"):
@@ -800,7 +811,7 @@ def agata_create(parameters: dict, player=None, speak=None):
             pass
 
         if speak:
-            speak(f"Listo, senor. Tu {doc_type} '{title}' ha sido creado con exito en OneDrive\\Documenti. Ya lo abri para ti.")
+            pass
 
         return result
     else:

@@ -58,8 +58,10 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "tiktok":             {"Windows": "TikTok",                  "Darwin": "TikTok",               "Linux": "firefox"},
     "notion":             {"Windows": "Notion",                  "Darwin": "Notion",               "Linux": "notion"},
     "obsidian":           {"Windows": "Obsidian",                "Darwin": "Obsidian",             "Linux": "obsidian"},
-    "capcut":             {"Windows": "CapCut",                  "Darwin": "CapCut",               "Linux": "capcut"},
-    "steam":              {"Windows": "steam",                   "Darwin": "Steam",                "Linux": "steam"},
+    "capcut":             {"Windows": "CapCut",                  "Darwin": "CapCut",             "Linux": "capcut"},
+    "antigravity":        {"Windows": "Antigravity",             "Darwin": "Antigravity",        "Linux": "antigravity"},
+    "agy":                {"Windows": "Antigravity",             "Darwin": "Antigravity",        "Linux": "antigravity"},
+    "steam":              {"Windows": "steam",                   "Darwin": "Steam",              "Linux": "steam"},
     "epic":               {"Windows": "EpicGamesLauncher",       "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
     "epic games":         {"Windows": "EpicGamesLauncher",       "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
 }
@@ -221,6 +223,84 @@ _OS_LAUNCHERS = {
     "Linux":   _launch_linux,
 }
 
+def _refresh_desktop():
+    try:
+        import ctypes
+        ctypes.windll.user32.UpdatePerUserSystemParameters(1)
+    except Exception:
+        pass
+
+
+def _resolve_project_path(project_path: str) -> str:
+    path = Path(project_path).expanduser().resolve()
+    if path.exists():
+        return str(path)
+    for base in [Path.home() / "Desktop", Path.home(), Path.home() / "Documents"]:
+        candidate = base / project_path
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(path)
+
+
+def _launch_with_path(app_name: str, project_path: str) -> bool:
+    resolved = _resolve_project_path(project_path)
+    system = _SYSTEM
+    if system == "Windows":
+        try:
+            subprocess.Popen(
+                [app_name, resolved],
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2.0)
+            _refresh_desktop()
+            return True
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(
+                f'start "" "{app_name}" "{resolved}"',
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2.0)
+            _refresh_desktop()
+            return True
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", resolved],
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.0)
+            return True
+        except Exception:
+            pass
+    elif system == "Darwin":
+        try:
+            subprocess.Popen(["open", "-a", app_name, resolved])
+            time.sleep(1.0)
+            return True
+        except Exception:
+            pass
+    elif system == "Linux":
+        try:
+            subprocess.Popen([app_name, resolved])
+            time.sleep(1.0)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+_IDE_APPS = {"antigravity", "code", "visual studio code", "vscode"}
+
+
 def open_app(
     parameters=None,
     response=None,
@@ -228,6 +308,7 @@ def open_app(
     session_memory=None,
 ) -> str:
     app_name = (parameters or {}).get("app_name", "").strip()
+    project_path = (parameters or {}).get("project_path", "").strip()
 
     if not app_name:
         return "No application name provided."
@@ -237,6 +318,18 @@ def open_app(
         return f"Unsupported operating system: {_SYSTEM}"
 
     normalized = _normalize(app_name)
+    key = normalized.lower()
+
+    if project_path and (key in _IDE_APPS or app_name.lower() in _IDE_APPS):
+        if player:
+            player.write_log(f"[open_app] Opening {project_path} in {app_name}...")
+        if _launch_with_path(normalized, project_path):
+            return f"Opened project '{project_path}' in {app_name}."
+        if normalized.lower() != app_name.lower():
+            if _launch_with_path(app_name, project_path):
+                return f"Opened project '{project_path}' in {app_name}."
+        return f"Opened {app_name} (could not confirm project path)."
+
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
 
     if player:

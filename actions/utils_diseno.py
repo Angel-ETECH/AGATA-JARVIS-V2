@@ -5,7 +5,10 @@ from pathlib import Path
 
 import requests
 from colorthief import ColorThief
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 from PIL import Image
 from io import BytesIO
 

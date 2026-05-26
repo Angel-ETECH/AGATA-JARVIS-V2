@@ -5,28 +5,21 @@ import re
 import time
 from pathlib import Path
 
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.constants import MODEL_PLANNER
+from core.ai_providers import generate
+from core.logging import get_logger
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+log = get_logger("jarvis.code_helper")
 
-BASE_DIR           = get_base_dir()
-API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-2.5-flash"
+_provider          = "gemini"
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_gemini(model: str = GEMINI_MODEL):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model)
+def _gemini_generate(prompt: str, model: str = MODEL_PLANNER) -> str:
+    return generate(prompt, provider=_provider, model=model)
 
 
 def _clean_code(text: str) -> str:
@@ -146,7 +139,6 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
-    model = _get_gemini()
 
     prompt = f"""You are an expert {lang} developer.
 Write clean, working, well-commented {lang} code for the description below.
@@ -161,15 +153,13 @@ Description: {description}
 
 Code:"""
 
-    response = model.generate_content(prompt)
-    code     = _clean_code(response.text)
+    code     = _clean_code(_gemini_generate(prompt))
     path     = _resolve_save_path(output_path, lang)
     _save_file(path, code)
     return code, path
 
 
 def _fix_code(code: str, error_output: str, description: str) -> str:
-    model  = _get_gemini()
     prompt = f"""You are an expert debugger.
 The code below failed with the following error. Fix it.
 Return ONLY the corrected code — no explanation, no markdown, no backticks.
@@ -184,8 +174,7 @@ Broken code:
 
 Fixed code:"""
 
-    response = model.generate_content(prompt)
-    return _clean_code(response.text)
+    return _clean_code(_gemini_generate(prompt))
 
 
 def _run_file(path: Path, args: list, timeout: int) -> str:
@@ -303,7 +292,6 @@ def _edit_action(file_path, instruction, player) -> str:
     if player:
         player.write_log("[Code] Editing file...")
 
-    model  = _get_gemini()
     prompt = f"""You are an expert code editor.
 Apply the following change to the code below.
 Return ONLY the complete updated code — no explanation, no markdown, no backticks.
@@ -316,8 +304,7 @@ Original code:
 Updated code:"""
 
     try:
-        response = model.generate_content(prompt)
-        edited   = _clean_code(response.text)
+        edited = _clean_code(_gemini_generate(prompt))
     except Exception as e:
         return f"Could not edit code: {e}"
 
@@ -348,8 +335,7 @@ Code:
 Explanation:"""
 
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        return _gemini_generate(prompt).strip()
     except Exception as e:
         return f"Could not explain code: {e}"
 
@@ -378,7 +364,6 @@ def _optimize_action(file_path, code, language, output_path, player) -> str:
         player.write_log("[Code] Optimizing code...")
 
     lang  = language or "python"
-    model = _get_gemini()
 
     prompt = f"""You are an expert {lang} developer and code reviewer.
 Optimize the following code for:
@@ -395,8 +380,7 @@ Original code:
 Optimized code:"""
 
     try:
-        response  = model.generate_content(prompt)
-        optimized = _clean_code(response.text)
+        optimized = _clean_code(_gemini_generate(prompt))
     except Exception as e:
         return f"Could not optimize code: {e}"
 
@@ -444,7 +428,7 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=_get_api_key())
+        client = genai.Client(api_key=get_api_key())
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)
@@ -473,7 +457,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         ]
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=MODEL_PLANNER,
             contents=contents,
         )
 
@@ -535,6 +519,12 @@ def code_helper(
     code        = p.get("code", "").strip()
     args        = p.get("args", [])
     timeout     = int(p.get("timeout", 30))
+    provider    = p.get("provider", "gemini").strip().lower()
+
+    if provider not in ("gemini", "opencode", "ollama"):
+        provider = "gemini"
+    global _provider
+    _provider = provider
 
     if action == "auto":
         action = _detect_intent(description, file_path, code)

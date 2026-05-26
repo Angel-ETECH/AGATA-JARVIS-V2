@@ -3,25 +3,17 @@ import json
 import sys
 from pathlib import Path
 
-def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.logging import get_logger
 
-
-BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+log = get_logger("jarvis.web_search")
 
 
 def _gemini_search(query: str) -> str:
     from google import genai
 
-    client   = genai.Client(api_key=_get_api_key())
+    client   = genai.Client(api_key=get_api_key())
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=query,

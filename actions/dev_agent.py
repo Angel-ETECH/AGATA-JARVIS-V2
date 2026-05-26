@@ -5,29 +5,15 @@ import re
 import time
 from pathlib import Path
 
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.constants import MODEL_PLANNER, MODEL_WRITER, MAX_FIX_ATTEMPTS
+from core.ai_providers import generate
+from core.logging import get_logger
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+log = get_logger("jarvis.dev_agent")
 
-
-BASE_DIR         = get_base_dir()
-API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
-MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_model(model_name: str):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model_name)
+PROJECTS_DIR = Path.home() / "Desktop" / "JarvisProjects"
 
 
 def _strip_fences(text: str) -> str:
@@ -35,6 +21,17 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
+
+
+def _extract_json(text: str) -> str:
+    text = _strip_fences(text)
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        text = text[brace_start : brace_end + 1]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    text = re.sub(r"(?<!\\)'", '"', text)
+    return text
 
 
 def _is_rate_limit(error: Exception) -> bool:
@@ -96,13 +93,19 @@ class RateLimitError(Exception):
     pass
 
 
-def _plan_project(description: str, language: str) -> dict:
-    model = _get_model(MODEL_PLANNER)
+def _plan_project(description: str, language: str, database: str = "", framework: str = "", platform: str = "", provider: str = "gemini") -> dict:
+    tech_notes = ""
+    if database:
+        tech_notes += f"\nDatabase: {database} (include ORM/models and connection setup)"
+    if framework:
+        tech_notes += f"\nFramework: {framework} (use its project structure conventions)"
+    if platform:
+        tech_notes += f"\nPlatform: {platform} (target this environment)"
 
     prompt = f"""You are a senior software architect. Create a minimal, complete file plan for this project.
 
 Language: {language}
-Description: {description}
+Description: {description}{tech_notes}
 
 Return ONLY valid JSON — no markdown, no explanation:
 {{
@@ -135,11 +138,13 @@ Critical rules:
 JSON:"""
 
     try:
-        response = model.generate_content(prompt)
-        raw = _strip_fences(response.text)
-        return json.loads(raw)
+        raw = generate(prompt, provider=provider, model=MODEL_PLANNER,
+                       system_instruction="You are a senior software architect. Return ONLY valid JSON, no markdown, no explanation.",
+                       max_tokens=2000)
+        cleaned = _extract_json(raw)
+        return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}")
+        raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {raw[:300]}") from e
     except Exception as e:
         if _is_rate_limit(e):
             raise RateLimitError(str(e))
@@ -152,9 +157,8 @@ def _write_file(
     language: str,
     project_dir: Path,
     already_written: dict[str, str],
+    provider: str = "gemini",
 ) -> str:
-    model = _get_model(MODEL_WRITER)
-
     file_path = file_info["path"]
     file_desc = file_info.get("description", "")
     file_imports = file_info.get("imports", [])
@@ -214,8 +218,7 @@ General rules:
 Code for {file_path}:"""
 
     try:
-        response = model.generate_content(prompt)
-        code = _strip_fences(response.text)
+        code = _strip_fences(generate(prompt, provider=provider, model=MODEL_WRITER, max_tokens=4000))
 
         full_path = project_dir / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,10 +351,8 @@ def _fix_files(
     language: str,
     project_dir: Path,
     entry_point: str,
+    provider: str = "gemini",
 ) -> dict[str, str]:
-
-    model = _get_model(MODEL_PLANNER)
-
     error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
     error_type = _classify_error(error_output)
 
@@ -412,8 +413,7 @@ Rules:
 Fixed code for {fix_path}:"""
 
         try:
-            response = model.generate_content(prompt)
-            fixed = _strip_fences(response.text)
+            fixed = _strip_fences(generate(prompt, provider=provider, model=MODEL_PLANNER, max_tokens=4000))
 
             full_path = project_dir / fix_path
             full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -434,6 +434,10 @@ def _build_project(
     language: str,
     project_name: str,
     timeout: int,
+    database: str = "",
+    framework: str = "",
+    platform: str = "",
+    provider: str = "gemini",
     speak=None,
     player=None,
 ) -> str:
@@ -445,7 +449,7 @@ def _build_project(
 
     log("Planning project structure...")
     try:
-        plan = _plan_project(description, language)
+        plan = _plan_project(description, language, database, framework, platform, provider)
     except RateLimitError:
         msg = "Rate limit reached, sir. Please try again in a moment."
         if speak: speak(msg)
@@ -489,6 +493,7 @@ def _build_project(
                     language=language,
                     project_dir=project_dir,
                     already_written=file_codes,
+                    provider=provider,
                 )
                 file_codes[file_path] = code
                 time.sleep(0.4)
@@ -553,6 +558,7 @@ def _build_project(
                 language=language,
                 project_dir=project_dir,
                 entry_point=entry_point,
+                provider=provider,
             )
             file_codes.update(updated)
             time.sleep(1)
@@ -583,15 +589,33 @@ def dev_agent(
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
     timeout      = int(p.get("timeout", 30))
+    database     = p.get("database", "").strip()
+    framework    = p.get("framework", "").strip()
+    platform     = p.get("platform", "").strip()
+    provider     = p.get("provider", "gemini").strip().lower()
+
+    if provider not in ("gemini", "opencode", "ollama"):
+        provider = "gemini"
 
     if not description:
         return "Please describe the project you want me to build, sir."
+
+    if database:
+        description = f"{description}\nDatabase: {database}"
+    if framework:
+        description = f"{description}\nFramework: {framework}"
+    if platform:
+        description = f"{description}\nPlatform: {platform}"
 
     return _build_project(
         description  = description,
         language     = language,
         project_name = project_name,
         timeout      = timeout,
+        database     = database,
+        framework    = framework,
+        platform     = platform,
+        provider     = provider,
         speak        = speak,
         player       = player,
     )

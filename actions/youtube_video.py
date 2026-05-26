@@ -24,17 +24,13 @@ try:
 except ImportError:
     _TRANSCRIPT_OK = False
 
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.logging import get_logger
+
+log = get_logger("jarvis.youtube")
+
 from config import get_os, is_windows, is_mac, is_linux
-
-
-def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 HEADERS = {
     "User-Agent": (
@@ -46,11 +42,6 @@ HEADERS = {
 }
 
 _YT_VIDEO_FILTER = "EgIQAQ%3D%3D"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
 
 
 def _open_url(url: str) -> None:
@@ -158,26 +149,22 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
-    import google.generativeai as genai
+    from core.config import gemini_generate
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
-            "You are JARVIS, an AI assistant. "
-            "Summarize YouTube video transcripts clearly and concisely. "
-            "Structure: 1-sentence overview, then 3-5 key points. "
-            "Be direct. Address the user as 'sir'. "
-            "Match the language of the transcript."
-        )
+    system_instruction = (
+        "You are JARVIS, an AI assistant. "
+        "Summarize YouTube video transcripts clearly and concisely. "
+        "Structure: 1-sentence overview, then 3-5 key points. "
+        "Be direct. Address the user as 'sir'. "
+        "Match the language of the transcript."
     )
 
     max_chars = 80000
     truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
-    response  = model.generate_content(
-        f"Please summarize this YouTube video transcript:\n\n{truncated}"
+    return gemini_generate(
+        f"Please summarize this YouTube video transcript:\n\n{truncated}",
+        system_instruction=system_instruction,
     )
-    return response.text.strip()
 
 
 def _save_summary(content: str, video_url: str) -> str:

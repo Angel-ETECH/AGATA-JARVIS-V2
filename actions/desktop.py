@@ -9,24 +9,19 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.logging import get_logger
+
+log = get_logger("jarvis.desktop")
+
 try:
     import pyautogui
     _PYAUTOGUI = True
 except ImportError:
     _PYAUTOGUI = False
 
-_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
-
-
-def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-def _get_api_key() -> str:
-    path = _get_base_dir() / "config" / "api_keys.json"
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+_OS = platform.system()
     
 def _get_desktop() -> Path:
     if _OS == "Linux":
@@ -103,9 +98,7 @@ def _execute_generated_code(code: str, player=None) -> str:
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
 
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    from core.config import gemini_generate
 
     desktop = str(_get_desktop())
 
@@ -143,8 +136,7 @@ Output ONLY the Python code. No explanation, no markdown, no backticks.
 Task: {task}"""
 
     try:
-        response = model.generate_content(prompt)
-        code = response.text.strip()
+        code = gemini_generate(prompt)
         if code.startswith("```"):
             lines = code.split("\n")
             code  = "\n".join(lines[1:-1]).strip()

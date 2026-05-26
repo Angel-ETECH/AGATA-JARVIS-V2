@@ -25,18 +25,17 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-import google.generativeai as genai
-
-
-def _get_api_key() -> str:
-    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
 
 def _gemini_client():
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel("gemini-2.5-flash")
+    from core.config import gemini_generate
+    class _Wrapper:
+        def generate_content(self, prompt):
+            class _Resp:
+                pass
+            r = _Resp()
+            r.text = gemini_generate(prompt)
+            return r
+    return _Wrapper()
 
 
 def _detect_type(path: Path) -> str:

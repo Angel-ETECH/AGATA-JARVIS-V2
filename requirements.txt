@@ -1,11 +1,9 @@
 ﻿sounddevice
 google-genai
-google-generativeai
-pillow
+Pillow
 requests
 beautifulsoup4
 duckduckgo-search
-ddgs
 colorthief
 python-docx
 playwright          
@@ -15,7 +13,6 @@ pygetwindow
 opencv-python
 numpy
 mss
-Pillow
 psutil
 comtypes
 pycaw               
@@ -25,3 +22,7 @@ youtube-transcript-api
 pywinauto
 python-pptx
 pyqt6
+PyPDF2
+pdfplumber
+mysql-connector-python
+fpdf

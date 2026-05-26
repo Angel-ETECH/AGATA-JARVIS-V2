@@ -1,10 +1,8 @@
 import asyncio
 import re
 import threading
-import json
 import sys
 import traceback
-from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -16,6 +14,15 @@ from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
+
+from core.paths import PROMPT_PATH, AGATA_PROMPT_PATH
+from core.config import get_api_key
+from core.constants import (
+    LIVE_MODEL, CHANNELS, SEND_SAMPLE_RATE, RECEIVE_SAMPLE_RATE, CHUNK_SIZE,
+)
+from core.logging import get_logger
+
+log = get_logger("jarvis.main")
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
@@ -36,27 +43,25 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.agata_creator      import agata_create, list_palettes
 from actions.spotify_control    import spotify_control
-
-
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
-
-
-BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-AGATA_PROMPT    = BASE_DIR / "core" / "agata_prompt.txt"
-LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-CHANNELS            = 1
-SEND_SAMPLE_RATE    = 16000
-RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE          = 1024
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+from actions.system_monitor     import system_monitor
+from actions.clipboard_manager  import clipboard_manager
+from actions.pdf_tools          import pdf_tools
+from actions.file_converter     import file_converter
+from actions.database_query     import database_query
+from actions.translator         import translator
+from actions.news               import news
+from actions.scheduler          import scheduler
+from actions.backup             import backup
+from actions.stocks_crypto      import stocks_crypto
+from actions.email_manager      import email_manager
+from actions.calendar_manager   import calendar_manager
+from actions.macro_recorder     import macro_recorder
+from actions.workflow           import workflow
+from actions.recipes            import recipes
+from actions.podcast            import podcast
+from actions.web_builder         import web_builder
+from actions.terminal             import terminal
+from actions.slide_builder        import slide_builder
 
 
 def _load_system_prompt() -> str:
@@ -83,14 +88,20 @@ TOOL_DECLARATIONS = [
         "description": (
             "Opens any application on the computer. "
             "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool — never just say you opened it."
+            "website, or program. Also supports opening project folders in IDEs "
+            "like Antigravity and VS Code using the project_path parameter. "
+            "Always call this tool — never just say you opened it."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "app_name": {
                     "type": "STRING",
-                    "description": "Exact name of the application (e.g. 'WhatsApp', 'Chrome', 'Spotify')"
+                    "description": "Exact name of the application (e.g. 'WhatsApp', 'Chrome', 'Spotify', 'Antigravity')"
+                },
+                "project_path": {
+                    "type": "STRING",
+                    "description": "Optional: full path to a project folder to open in an IDE (Antigravity, VS Code, etc.)"
                 }
             },
             "required": ["app_name"]
@@ -177,10 +188,10 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "angle": {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
-                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"}
+                "source":   {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
+                "question": {"type": "STRING", "description": "The question or instruction about the captured image"}
             },
-            "required": ["text"]
+            "required": []
         }
     },
     {
@@ -265,7 +276,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "code_helper",
-        "description": "Writes, edits, explains, runs, or builds code files.",
+        "description": "Writes, edits, explains, runs, or builds code files. Supports gemini, opencode, and ollama providers.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -276,6 +287,7 @@ TOOL_DECLARATIONS = [
                 "file_path":   {"type": "STRING", "description": "Path to existing file for edit/explain/run/build"},
                 "code":        {"type": "STRING", "description": "Raw code string for explain"},
                 "args":        {"type": "STRING", "description": "CLI arguments for run/build"},
+                "provider":    {"type": "STRING", "description": "AI provider: gemini | opencode | ollama (default: gemini)"},
                 "timeout":     {"type": "INTEGER", "description": "Execution timeout in seconds (default: 30)"},
             },
             "required": ["action"]
@@ -283,14 +295,33 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "dev_agent",
-        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
+        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors. Ask the user ALL project specifications before calling this. Supports gemini, opencode, and ollama providers.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "description":  {"type": "STRING", "description": "What the project should do"},
+                "description":  {"type": "STRING", "description": "Complete project description including all features, database, framework, and design preferences"},
                 "language":     {"type": "STRING", "description": "Programming language (default: python)"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
+                "database":     {"type": "STRING", "description": "Database to use (e.g. SQLite, PostgreSQL, MySQL, MongoDB, Firebase)"},
+                "framework":    {"type": "STRING", "description": "Framework or technology (e.g. React, Django, Flask, FastAPI, Electron)"},
+                "platform":     {"type": "STRING", "description": "Where it runs: web, desktop, mobile, cli, api"},
+                "provider":     {"type": "STRING", "description": "AI provider: gemini | opencode | ollama (default: gemini)"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
+            },
+            "required": ["description"]
+        }
+    },
+    {
+        "name": "web_builder",
+        "description": "Builds complete websites using OpenCode AI, Ollama, or Gemini. Supports HTML/CSS/JS, React, Vue, Node.js. Plans structure, generates all files, installs npm deps, opens browser preview and VSCode.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "description":   {"type": "STRING", "description": "What the website should do and contain"},
+                "tech":          {"type": "STRING", "description": "html | react | vue | node | static | landing | dashboard | blog | portfolio | ecommerce"},
+                "features":      {"type": "STRING", "description": "Specific features: responsive, dark mode, animations, contact form, gallery, API calls, etc."},
+                "project_name":  {"type": "STRING", "description": "Optional project folder name (kebab-case)"},
+                "design":        {"type": "STRING", "description": "modern | minimal | dark | colorful | corporate (default: modern)"},
             },
             "required": ["description"]
         }
@@ -497,7 +528,7 @@ TOOL_DECLARATIONS = [
                     )
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "value": {"type": "STRING", "description": "Concise value in English (e.g. Juan, pizza, older sister)"},
             },
             "required": ["category", "key", "value"]
         }
@@ -567,7 +598,314 @@ TOOL_DECLARATIONS = [
         "description": "Shows available design color palettes for document creation (Agata feature).",
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
+    {
+        "name": "terminal",
+        "description": (
+            "Executes any command in the system terminal (PowerShell on Windows, "
+            "bash/zsh on Mac/Linux). Use this when the user asks to run a command, "
+            "execute a script, install packages, check system info, or any CLI task. "
+            "Returns the command output. Max 2000 chars returned."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "command": {
+                    "type": "STRING",
+                    "description": "The full command to execute (e.g. 'dir', 'ls -la', 'pip install requests', 'python script.py')"
+                },
+                "timeout": {
+                    "type": "INTEGER",
+                    "description": "Timeout in seconds (default: 30, max: 120)"
+                },
+                "cwd": {
+                    "type": "STRING",
+                    "description": "Working directory for the command (default: user home)"
+                }
+            },
+            "required": ["command"]
+        }
+    },
+    {
+        "name": "system_monitor",
+        "description": "Shows system information: CPU, RAM, disk, network, battery, running processes, uptime.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "cpu | ram | disk | network | battery | processes | uptime | full (default: full)"},
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "clipboard_manager",
+        "description": "Manages clipboard history: list history, get last item, copy at index, clear history.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "list | get_last | get_index | copy | clear"},
+                "index": {"type": "INTEGER", "description": "Clipboard history index for get_index"},
+                "text": {"type": "STRING", "description": "Text to copy to clipboard"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "pdf_tools",
+        "description": "Read, get info, merge, and split PDF files.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "read | info | merge | split"},
+                "file_path": {"type": "STRING", "description": "Path to the PDF file"},
+                "files": {"type": "STRING", "description": "Comma-separated file paths for merge"},
+                "pages": {"type": "STRING", "description": "Page range e.g. '1-5' or '1,3,5' (default: all)"},
+                "output_name": {"type": "STRING", "description": "Output file name for merge"},
+            },
+            "required": ["action", "file_path"]
+        }
+    },
+    {
+        "name": "file_converter",
+        "description": "Converts files between formats: images (png, jpg, webp, bmp, gif), text/markdown to PDF.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "image | to_pdf"},
+                "file_path": {"type": "STRING", "description": "Path to the file to convert"},
+                "to_format": {"type": "STRING", "description": "Target format for image conversion (png, jpg, webp, etc.)"},
+            },
+            "required": ["action", "file_path"]
+        }
+    },
+    {
+        "name": "database_query",
+        "description": "Executes SQL queries on SQLite or MySQL databases. Also lists tables.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "query | tables"},
+                "type": {"type": "STRING", "description": "sqlite | mysql (default: sqlite)"},
+                "file_path": {"type": "STRING", "description": "Path to the SQLite database file"},
+                "query": {"type": "STRING", "description": "SQL query to execute"},
+                "host": {"type": "STRING", "description": "MySQL host (default: localhost)"},
+                "user": {"type": "STRING", "description": "MySQL username"},
+                "password": {"type": "STRING", "description": "MySQL password"},
+                "database": {"type": "STRING", "description": "MySQL database name"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "translator",
+        "description": "Translates text between languages using AI. Supports: Spanish, English, French, German, Italian, Portuguese, Chinese, Japanese, Korean, Russian, Arabic, Hindi, Dutch, Polish, Turkish.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "text": {"type": "STRING", "description": "Text to translate"},
+                "target_lang": {"type": "STRING", "description": "Target language (e.g. english, spanish, french, es, en, fr)"},
+                "source_lang": {"type": "STRING", "description": "Source language (auto-detect if empty)"},
+            },
+            "required": ["text", "target_lang"]
+        }
+    },
+    {
+        "name": "news",
+        "description": "Searches and retrieves latest news by category or keyword via DuckDuckGo.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "top | search"},
+                "category": {"type": "STRING", "description": "technology | sports | politics | economy | science | health | entertainment"},
+                "query": {"type": "STRING", "description": "Search term for news"},
+                "max_results": {"type": "INTEGER", "description": "Max results (default: 5-8)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "scheduler",
+        "description": "Manages scheduled recurring tasks: list, add, remove, toggle, or run tasks now. Supports open_app, run_command, reminder, and backup actions.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "list | add | remove | toggle | run_now"},
+                "name": {"type": "STRING", "description": "Task name"},
+                "task_action": {"type": "STRING", "description": "open_app | run_command | reminder | backup"},
+                "interval_minutes": {"type": "INTEGER", "description": "How often to run (minutes, default: 60)"},
+                "extra": {"type": "STRING", "description": "App name, command, or source->dest for backup tasks"},
+                "index": {"type": "INTEGER", "description": "Task index to remove/toggle/run"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "backup",
+        "description": "Backs up files or folders to a destination. Can also schedule recurring backups.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "run | schedule"},
+                "source": {"type": "STRING", "description": "File or folder to backup"},
+                "destination": {"type": "STRING", "description": "Where to save the backup"},
+                "interval_minutes": {"type": "INTEGER", "description": "Minutes between scheduled backups (default: 1440 = daily)"},
+            },
+            "required": ["action", "source"]
+        }
+    },
+    {
+        "name": "stocks_crypto",
+        "description": "Gets real-time stock prices (AAPL, TSLA, MSFT, etc.) and crypto prices (BTC, ETH, SOL, etc.).",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "stock | crypto"},
+                "symbol": {"type": "STRING", "description": "Stock symbol (AAPL, TSLA) or crypto name (bitcoin, ethereum, btc, eth)"},
+            },
+            "required": ["action", "symbol"]
+        }
+    },
+    {
+        "name": "email_manager",
+        "description": "Reads or sends emails via Gmail or Outlook. Requires setup first with email and app password.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "read | send | setup | status"},
+                "email": {"type": "STRING", "description": "Email address for setup"},
+                "password": {"type": "STRING", "description": "App password for setup"},
+                "provider": {"type": "STRING", "description": "gmail | outlook"},
+                "to": {"type": "STRING", "description": "Recipient email for sending"},
+                "subject": {"type": "STRING", "description": "Email subject"},
+                "body": {"type": "STRING", "description": "Email body text"},
+                "limit": {"type": "INTEGER", "description": "Max emails to read (default: 5)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "calendar_manager",
+        "description": "Manages personal calendar: view upcoming/today events, add, remove events.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "upcoming | list | add | remove | today"},
+                "title": {"type": "STRING", "description": "Event title"},
+                "datetime": {"type": "STRING", "description": "Date and time: YYYY-MM-DDTHH:MM"},
+                "location": {"type": "STRING", "description": "Event location"},
+                "days": {"type": "INTEGER", "description": "Days ahead to look (default: 7)"},
+                "index": {"type": "INTEGER", "description": "Event index to remove"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "macro_recorder",
+        "description": "Records and plays back mouse movements, clicks, and keystrokes as macros.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "record | stop | play | play_now | list | delete"},
+                "name": {"type": "STRING", "description": "Macro name"},
+                "duration": {"type": "INTEGER", "description": "Recording duration in seconds (default: 10)"},
+                "speed": {"type": "NUMBER", "description": "Playback speed multiplier (default: 1.0)"},
+                "delay": {"type": "INTEGER", "description": "Delay before playback starts (default: 3)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "workflow",
+        "description": "Creates, lists, runs, and deletes multi-step workflows that chain multiple tools together.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "list | run | create | delete"},
+                "name": {"type": "STRING", "description": "Workflow name"},
+                "steps": {"type": "STRING", "description": "JSON array of steps for create: [{\"tool\": \"...\", \"parameters\": {...}}]"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "recipes",
+        "description": "Searches for recipes online. Finds ingredients, instructions from cooking sites.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | random"},
+                "query": {"type": "STRING", "description": "What recipe to search for (e.g. 'pasta carbonara')"},
+                "max_results": {"type": "INTEGER", "description": "Max results (default: 3)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "podcast",
+        "description": "Searches for podcasts by topic or keyword. Shows trending podcasts.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | trending"},
+                "query": {"type": "STRING", "description": "Topic to search podcasts for"},
+                "max_results": {"type": "INTEGER", "description": "Max results (default: 5)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "slide_builder",
+        "description": (
+            "Creates CINEMATIC HTML slideshow presentations with immersive design system. "
+            "Generates full-screen slides with dark cinematic theme, glow effects, image integration, "
+            "and smooth scroll-snap navigation. Use when the user wants a visual presentation, "
+            "slideshow, portfolio, or cinematic gallery. The result opens automatically in the browser."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "topic": {
+                    "type": "STRING",
+                    "description": "Main topic or theme of the presentation (e.g. 'Product Launch', 'Portfolio', 'Tech Conference')"
+                },
+                "slides": {
+                    "type": "STRING",
+                    "description": "Description of what each slide should contain. Leave empty for AI-generated content."
+                },
+                "include_images": {
+                    "type": "BOOLEAN",
+                    "description": "Whether to include relevant background images (default: true)"
+                },
+            },
+            "required": ["topic"]
+        }
+    },
 ]
+
+_CASUAL_TOOLS = {
+    "open_app", "web_search", "weather_report", "send_message", "reminder",
+    "youtube_video", "screen_process", "save_memory", "toggle_panel", 
+    "switch_persona", "shutdown_jarvis", "translator", "news", "recipes", 
+    "podcast", "stocks_crypto", "calendar_manager", "email_manager"
+}
+
+_AGATA_TOOLS = _CASUAL_TOOLS | {
+    "agata_create", "list_palettes", "file_converter", "pdf_tools"
+}
+
+_JARVIS_TOOLS = _CASUAL_TOOLS | {
+    "browser_control", "file_controller", "spotify_control", "file_processor",
+    "computer_settings", "desktop_control", "code_helper", "dev_agent", 
+    "agent_task", "computer_control", "game_updater", "flight_finder",
+    "system_monitor", "clipboard_manager", "database_query", "scheduler",
+    "backup", "macro_recorder", "workflow", "web_builder", "terminal",
+    "slide_builder"
+}
+
+def _filter_tools_for_persona(persona: str) -> list[dict]:
+    if persona == "agata":
+        return [t for t in TOOL_DECLARATIONS if t["name"] in _AGATA_TOOLS]
+    return [t for t in TOOL_DECLARATIONS if t["name"] in _JARVIS_TOOLS]
+
 
 class JarvisLive:
 
@@ -605,14 +943,18 @@ class JarvisLive:
 
     def speak(self, text: str):
         if not self._loop or not self.session:
+            log.warning("[SPEAK] Cannot speak: loop=%s session=%s", bool(self._loop), bool(self.session))
             return
-        asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
-                turn_complete=True
-            ),
-            self._loop
-        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.session.send_client_content(
+                    turns={"parts": [{"text": text}]},
+                    turn_complete=True
+                ),
+                self._loop
+            )
+        except Exception as e:
+            log.warning("[SPEAK] Failed: %s", e)
 
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
@@ -627,13 +969,14 @@ class JarvisLive:
 
         if self._persona == "agata":
             try:
-                sys_prompt = AGATA_PROMPT.read_text(encoding="utf-8")
+                sys_prompt = AGATA_PROMPT_PATH.read_text(encoding="utf-8")
             except Exception:
                 sys_prompt = _load_system_prompt()
-            voice_name = "Kore"
+            voice_name = "Aoede"
         else:
             sys_prompt = _load_system_prompt()
-            voice_name = "Charon"
+            sys_prompt += "\n\nCRITICAL: Eres J.A.R.V.I.S., la inteligencia artificial de Tony Stark."
+            voice_name = "Orus"
 
         now      = datetime.now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -648,12 +991,14 @@ class JarvisLive:
             parts.append(mem_str)
         parts.append(sys_prompt)
 
+        tools = _filter_tools_for_persona(self._persona)
+
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
             input_audio_transcription={},
             system_instruction="\n".join(parts),
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
+            tools=[{"function_declarations": tools}],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -667,7 +1012,7 @@ class JarvisLive:
         name = fc.name
         args = dict(fc.args or {})
 
-        print(f"[JARVIS] [TOOL] {name}  {args}")
+        log.info("[TOOL] %s  %s", name, args)
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
@@ -676,7 +1021,7 @@ class JarvisLive:
             value    = args.get("value", "")
             if key and value:
                 update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] [SAVE] save_memory: {category}/{key} = {value}")
+                log.info("[Memory] [SAVE] %s/%s = %s", category, key, value)
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -685,151 +1030,16 @@ class JarvisLive:
             )
 
         loop   = asyncio.get_event_loop()
-        result = "Done."
+        result = "Hecho."
+        silent = False
+
+        def _run(func, *a, **kw):
+            return loop.run_in_executor(None, lambda: func(*a, **kw))
 
         try:
-            if name == "open_app":
-                r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
-                result = r or f"Opened {args.get('app_name')}."
-
-            elif name == "weather_report":
-                r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
-                result = r or "Weather delivered."
-
-            elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "file_controller":
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "send_message":
-                r = await loop.run_in_executor(None, lambda: send_message(parameters=args, response=None, player=self.ui, session_memory=None))
-                result = r or f"Message sent to {args.get('receiver')}."
-
-            elif name == "reminder":
-                r = await loop.run_in_executor(None, lambda: reminder(parameters=args, response=None, player=self.ui))
-                result = r or "Reminder set."
-
-            elif name == "youtube_video":
-                r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui))
-                result = r or "Done."
-
-            elif name == "screen_process":
-                threading.Thread(
-                    target=screen_process,
-                    kwargs={"parameters": args, "response": None,
-                            "player": self.ui, "session_memory": None},
-                    daemon=True
-                ).start()
-                result = "Vision module activated. Stay completely silent — vision module will speak directly."
-
-            elif name == "computer_settings":
-                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
-                result = r or "Done."
-
-            elif name == "desktop_control":
-                r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "code_helper":
-                r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "dev_agent":
-                r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "agent_task":
-                from agent.task_queue import get_queue, TaskPriority
-                priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
-                priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
-                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
-                result   = f"Task started (ID: {task_id})."
-
-            elif name == "web_search":
-                r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
-                result = r or "Done."
-            elif name == "file_processor":
-                if not args.get("file_path") and self.ui.current_file:
-                    args["file_path"] = self.ui.current_file
-                r = await loop.run_in_executor(
-                    None,
-                    lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
-                )
-                result = r or "Done."
-
-            elif name == "computer_control":
-                r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "game_updater":
-                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "flight_finder":
-                r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
-                result = r or "Done."
-
-            elif name == "spotify_control":
-                r = await loop.run_in_executor(None, lambda: spotify_control(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "toggle_panel":
-                action = args.get("action", "show_all")
-                self.ui.toggle_panel(action)
-                result = f"Panel {action}."
-                if action == "show_chat":
-                    self.speak("Chat abierto, senor. Escribe lo que necesites.")
-                elif action == "show_files":
-                    self.speak("Cargador de archivos listo, senor.")
-                elif action == "hide_all":
-                    self.speak("Paneles ocultos, senor.")
-
-            elif name == "switch_persona":
-                new_persona = args.get("persona", "jarvis")
-                if new_persona not in ("jarvis", "agata"):
-                    result = f"Persona invalida: {new_persona}. Usa jarvis o agata."
-                else:
-                    self._persona = new_persona
-                    self.ui.set_persona(new_persona)
-                    if new_persona == "agata":
-                        self.ui.write_log("SYS: Agata activada. Cambiando voz...")
-                        result = "Agata activada."
-                        self.speak("Agata en linea, senor. Dejame crear algo hermoso para ti.")
-                    else:
-                        self.ui.write_log("SYS: JARVIS reactivado.")
-                        result = "JARVIS activado."
-                        self.speak("JARVIS en linea, senor.")
-                    self._reconnect = True
-
-            elif name == "agata_create":
-                args["api_key"] = _get_api_key()
-                doc_type = args.get("type", "word")
-                title = args.get("title", "documento")
-                self.ui.write_log(f"[Agata] Iniciando {doc_type.upper()} '{title}' en segundo plano...")
-                self.speak(f"Dejame crear tu {doc_type} sobre {title} en segundo plano, senor. Sigue hablando mientras trabajo.")
-                threading.Thread(
-                    target=agata_create,
-                    kwargs={"parameters": args, "player": self.ui, "speak": self.speak},
-                    daemon=True
-                ).start()
-                result = f"Creando {doc_type} '{title}' en segundo plano."
-
-            elif name == "list_palettes":
-                r = list_palettes(player=self.ui)
-                result = r or "Done."
-
-            elif name == "shutdown_jarvis":
-                self.ui.write_log("SYS: Apagado solicitado.")
-                self.speak("Adios, senor.")
-                def _shutdown():
-                    import time, os
-                    time.sleep(1)
-                    os._exit(0)
-                threading.Thread(target=_shutdown, daemon=True).start()
-
+            handler = self._get_handler(name)
+            if handler:
+                result = await handler(args, loop, _run)
             else:
                 result = f"Unknown tool: {name}"
 
@@ -838,22 +1048,253 @@ class JarvisLive:
             traceback.print_exc()
             self.speak_error(name, e)
 
+        if isinstance(result, dict):
+            silent = result.pop("__silent__", False)
+            result = result.get("result", "ok")
+
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] [DONE] {name} -> {str(result)[:80]}")
+        log.info("[DONE] %s -> %s silent=%s", name, str(result)[:80], silent)
+        resp = {"result": result}
+        if silent:
+            resp["silent"] = True
         return types.FunctionResponse(
             id=fc.id, name=name,
-            response={"result": result}
+            response=resp
         )
+
+    def _get_handler(self, name: str):
+        handlers = {
+            "open_app":          self._h_open_app,
+            "weather_report":    self._h_weather,
+            "browser_control":   self._h_browser,
+            "file_controller":   self._h_file_ctrl,
+            "send_message":      self._h_send_msg,
+            "reminder":          self._h_reminder,
+            "youtube_video":     self._h_youtube,
+            "screen_process":    self._h_screen,
+            "computer_settings": self._h_comp_settings,
+            "desktop_control":   self._h_desktop,
+            "code_helper":       self._h_code,
+            "dev_agent":         self._h_dev_agent,
+            "agent_task":        self._h_agent_task,
+            "web_search":        self._h_web_search,
+            "file_processor":    self._h_file_proc,
+            "computer_control":  self._h_comp_control,
+            "game_updater":      self._h_game,
+            "flight_finder":     self._h_flight,
+            "spotify_control":   self._h_spotify,
+            "toggle_panel":      self._h_toggle_panel,
+            "switch_persona":    self._h_switch_persona,
+            "agata_create":      self._h_agata_create,
+            "list_palettes":     self._h_list_palettes,
+            "shutdown_jarvis":   self._h_shutdown,
+            "system_monitor":    self._h_system_monitor,
+            "clipboard_manager": self._h_clipboard,
+            "pdf_tools":         self._h_pdf_tools,
+            "file_converter":    self._h_file_converter,
+            "database_query":    self._h_db_query,
+            "translator":        self._h_translator,
+            "news":              self._h_news,
+            "scheduler":         self._h_scheduler,
+            "backup":            self._h_backup,
+            "stocks_crypto":     self._h_stocks,
+            "email_manager":     self._h_email,
+            "calendar_manager":  self._h_calendar,
+            "macro_recorder":    self._h_macro,
+            "workflow":          self._h_workflow,
+            "recipes":           self._h_recipes,
+            "podcast":           self._h_podcast,
+            "web_builder":       self._h_web_builder,
+            "terminal":          self._h_terminal,
+            "slide_builder":     self._h_slide_builder,
+        }
+        return handlers.get(name)
+
+    async def _h_open_app(self, args, loop, _run):
+        return (await _run(open_app, parameters=args, response=None, player=self.ui)) or f"Opened {args.get('app_name')}."
+
+    async def _h_weather(self, args, loop, _run):
+        return (await _run(weather_action, parameters=args, player=self.ui)) or "Weather delivered."
+
+    async def _h_browser(self, args, loop, _run):
+        return (await _run(browser_control, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_file_ctrl(self, args, loop, _run):
+        return (await _run(file_controller, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_send_msg(self, args, loop, _run):
+        return (await _run(send_message, parameters=args, response=None, player=self.ui, session_memory=None)) or f"Message sent to {args.get('receiver')}."
+
+    async def _h_reminder(self, args, loop, _run):
+        return (await _run(reminder, parameters=args, response=None, player=self.ui)) or "Reminder set."
+
+    async def _h_youtube(self, args, loop, _run):
+        return (await _run(youtube_video, parameters=args, response=None, player=self.ui)) or "Hecho."
+
+    async def _h_screen(self, args, loop, _run):
+        threading.Thread(
+            target=screen_process,
+            kwargs={"parameters": args, "response": None,
+                    "player": self.ui, "session_memory": None,
+                    "speak_func": self.speak},
+            daemon=True
+        ).start()
+        return {"__silent__": True, "result": "Vision module activated."}
+
+    async def _h_comp_settings(self, args, loop, _run):
+        return (await _run(computer_settings, parameters=args, response=None, player=self.ui)) or "Hecho."
+
+    async def _h_desktop(self, args, loop, _run):
+        return (await _run(desktop_control, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_code(self, args, loop, _run):
+        return (await _run(code_helper, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_dev_agent(self, args, loop, _run):
+        return (await _run(dev_agent, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_agent_task(self, args, loop, _run):
+        from agent.task_queue import get_queue, TaskPriority
+        priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
+        priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
+        task_id = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
+        return f"Task started (ID: {task_id})."
+
+    async def _h_web_search(self, args, loop, _run):
+        return (await _run(web_search_action, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_file_proc(self, args, loop, _run):
+        if not args.get("file_path") and self.ui.current_file:
+            args["file_path"] = self.ui.current_file
+        return (await _run(file_processor, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_comp_control(self, args, loop, _run):
+        return (await _run(computer_control, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_game(self, args, loop, _run):
+        return (await _run(game_updater, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_flight(self, args, loop, _run):
+        return (await _run(flight_finder, parameters=args, player=self.ui)) or "Hecho."
+
+    async def _h_spotify(self, args, loop, _run):
+        return (await _run(spotify_control, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_toggle_panel(self, args, loop, _run):
+        action = args.get("action", "show_all")
+        self.ui.toggle_panel(action)
+        return f"Panel {action}."
+
+    async def _h_switch_persona(self, args, loop, _run):
+        new_persona = args.get("persona", "jarvis")
+        if new_persona not in ("jarvis", "agata"):
+            return f"Persona invalida: {new_persona}. Usa jarvis o agata."
+        self._persona = new_persona
+        self.ui.set_persona(new_persona)
+        self._reconnect = True
+        if new_persona == "agata":
+            self.ui.write_log("SYS: Agata activada. Cambiando voz...")
+            return "Hola, señor. Soy Agata. Encantada de estar con usted. ¿En qué puedo ayudarle hoy?"
+        else:
+            self.ui.write_log("SYS: JARVIS reactivado.")
+            return "Señor, Jarvis de vuelta. ¿Cómo está? Aquí estoy para lo que necesite."
+
+    async def _h_agata_create(self, args, loop, _run):
+        args["api_key"] = get_api_key()
+        doc_type = args.get("type", "word")
+        title = args.get("title", "documento")
+        self.ui.write_log(f"[Agata] Iniciando {doc_type.upper()} '{title}' en segundo plano...")
+
+        def _agata_thread():
+            try:
+                res = agata_create(parameters=args, player=self.ui, speak=self.speak)
+                if res and ("error" in str(res).lower() or "no pude" in str(res).lower()):
+                    self.ui.write_log(f"[Agata] ERROR: {res}")
+            except Exception as e:
+                self.ui.write_log(f"[Agata] EXCEPCION: {e}")
+
+        threading.Thread(target=_agata_thread, daemon=True).start()
+        return f"Creando {doc_type} '{title}' en segundo plano."
+
+    async def _h_list_palettes(self, args, loop, _run):
+        return list_palettes(player=self.ui) or "Hecho."
+
+    async def _h_shutdown(self, args, loop, _run):
+        self.ui.write_log("SYS: Apagado solicitado.")
+        self.speak("Adios, senor.")
+        def _shutdown():
+            import time, os
+            time.sleep(1)
+            os._exit(0)
+        threading.Thread(target=_shutdown, daemon=True).start()
+        return "Shutting down."
+
+    async def _h_system_monitor(self, args, loop, _run):
+        return (await _run(system_monitor, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_clipboard(self, args, loop, _run):
+        return (await _run(clipboard_manager, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_pdf_tools(self, args, loop, _run):
+        return (await _run(pdf_tools, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_file_converter(self, args, loop, _run):
+        return (await _run(file_converter, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_db_query(self, args, loop, _run):
+        return (await _run(database_query, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_translator(self, args, loop, _run):
+        return (await _run(translator, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_news(self, args, loop, _run):
+        return (await _run(news, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_scheduler(self, args, loop, _run):
+        return (await _run(scheduler, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_backup(self, args, loop, _run):
+        return (await _run(backup, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_stocks(self, args, loop, _run):
+        return (await _run(stocks_crypto, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_email(self, args, loop, _run):
+        return (await _run(email_manager, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_calendar(self, args, loop, _run):
+        return (await _run(calendar_manager, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_macro(self, args, loop, _run):
+        return (await _run(macro_recorder, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_workflow(self, args, loop, _run):
+        return (await _run(workflow, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_recipes(self, args, loop, _run):
+        return (await _run(recipes, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_podcast(self, args, loop, _run):
+        return (await _run(podcast, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_web_builder(self, args, loop, _run):
+        return (await _run(web_builder, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_terminal(self, args, loop, _run):
+        return (await _run(terminal, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
+
+    async def _h_slide_builder(self, args, loop, _run):
+        return (await _run(slide_builder, parameters=args, player=self.ui, speak=self.speak)) or "Hecho."
 
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            await self.session.send_realtime_input(audio=msg)
 
     async def _listen_audio(self):
-        print("[JARVIS] [MIC] Mic started")
+        log.info("[MIC] Mic started")
         loop = asyncio.get_event_loop()
 
         def _enqueue(data):
@@ -878,15 +1319,15 @@ class JarvisLive:
                 blocksize=CHUNK_SIZE,
                 callback=callback,
             ):
-                print("[JARVIS] [MIC] Mic stream open")
+                log.info("[MIC] Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
-            print(f"[JARVIS] [ERR] Mic: {e}")
+            log.error("Mic: %s", e)
             raise
 
     async def _receive_audio(self):
-        print("[JARVIS] [RECV] Recv started")
+        log.info("[RECV] Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -929,22 +1370,24 @@ class JarvisLive:
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] [CALL] {fc.name}")
+                            log.info("[CALL] %s", fc.name)
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
                         if self._reconnect:
-                            print("[JARVIS] [RECONN] Persona changed, reconnecting...")
+                            log.info("[RECONN] Persona changed, reconnecting...")
                             raise ConnectionError("persona_switch")
+        except ConnectionError:
+            raise
         except Exception as e:
-            print(f"[JARVIS] [ERR] Recv: {e}")
+            log.error("Recv: %s", e)
             traceback.print_exc()
             raise
 
     async def _play_audio(self):
-        print("[JARVIS] [PLAY] Play started")
+        log.info("[PLAY] Play started")
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
@@ -973,7 +1416,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
-            print(f"[JARVIS] [ERR] Play: {e}")
+            log.error("Play: %s", e)
             raise
         finally:
             self.set_speaking(False)
@@ -982,14 +1425,14 @@ class JarvisLive:
 
     async def run(self):
         client = genai.Client(
-            api_key=_get_api_key(),
+            api_key=get_api_key(),
             http_options={"api_version": "v1beta"}
         )
 
         backoff = 3
         while True:
             try:
-                print("[JARVIS] [CONN] Connecting...")
+                log.info("[CONN] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -1003,7 +1446,7 @@ class JarvisLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] [OK] Connected.")
+                    log.info("[OK] Connected.")
                     self.ui.set_state("LISTENING")
                     name = "AGATA" if self._persona == "agata" else "JARVIS"
                     self.ui.write_log(f"SYS: {name} en linea.")
@@ -1014,17 +1457,27 @@ class JarvisLive:
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
 
+            except BaseExceptionGroup as e:
+                msg = str(e)
+                if any("persona_switch" in str(sub) for sub in getattr(e, "exceptions", [])):
+                    log.info("[RECONN] Reconnecting after persona switch...")
+                    backoff = 0
+                elif "1008" in msg or "policy violation" in msg:
+                    log.error("Model error: %s", msg[:120])
+                else:
+                    log.warning(str(e))
+                    traceback.print_exc()
             except Exception as e:
                 msg = str(e)
                 if "1008" in msg or "policy violation" in msg:
-                    print(f"[JARVIS] [API] Model error: {msg[:120]}")
+                    log.error("Model error: %s", msg[:120])
                 else:
-                    print(f"[JARVIS] [WARN] {e}")
+                    log.warning(str(e))
                     traceback.print_exc()
             self.set_speaking(False)
             self._reconnect = False
             self.ui.set_state("THINKING")
-            print(f"[JARVIS] [RETRY] Reconnecting in {backoff}s...")
+            log.info("[RETRY] Reconnecting in %ss...", backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.5, 30)
 
@@ -1037,7 +1490,7 @@ def main():
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
-            print("\n[SHUTDOWN] Apagando...")
+            log.info("[SHUTDOWN] Apagando...")
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()

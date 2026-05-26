@@ -8,29 +8,21 @@ import os
 from pathlib import Path
 from typing import Callable
 
+from core.paths import BASE_DIR
+from core.config import get_api_key
+from core.logging import get_logger
+from core.constants import MODEL_LITE
+
+log = get_logger("jarvis.executor")
+
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
 
-
-def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
-    import google.generativeai as genai
+    from core.config import gemini_generate
 
     if speak:
-        speak("Writing custom code for this task, sir.")
+        pass
 
     home      = Path.home()
     desktop   = home / "Desktop"
@@ -46,28 +38,24 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
-            "You are an expert Python developer. "
-            "Write clean, complete, working Python code. "
-            "Use standard library + common packages. "
-            "Install missing packages with subprocess + pip if needed. "
-            "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
-            f"SYSTEM PATHS:\n"
-            f"  Desktop   = r'{desktop}'\n"
-            f"  Downloads = r'{downloads}'\n"
-            f"  Documents = r'{documents}'\n"
-            f"  Home      = r'{home}'\n"
-        )
+    system_instruction = (
+        "You are an expert Python developer. "
+        "Write clean, complete, working Python code. "
+        "Use standard library + common packages. "
+        "Install missing packages with subprocess + pip if needed. "
+        "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
+        f"SYSTEM PATHS:\n"
+        f"  Desktop   = r'{desktop}'\n"
+        f"  Downloads = r'{downloads}'\n"
+        f"  Documents = r'{documents}'\n"
+        f"  Home      = r'{home}'\n"
     )
 
     try:
-        response = model.generate_content(
-            f"Write Python code to accomplish this task:\n\n{description}"
+        code = gemini_generate(
+            f"Write Python code to accomplish this task:\n\n{description}",
+            system_instruction=system_instruction,
         )
-        code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 
         with tempfile.NamedTemporaryFile(
@@ -128,16 +116,14 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    from core.config import gemini_generate
     try:
-        response = model.generate_content(
+        return gemini_generate(
             f"What language is this text written in? "
             f"Reply with ONLY the language name in English (e.g. Turkish, English, French).\n\n"
-            f"Text: {text[:200]}"
+            f"Text: {text[:200]}",
+            model=MODEL_LITE,
         )
-        return response.text.strip()
     except Exception:
         return "English"
 
@@ -146,9 +132,7 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        from core.config import gemini_generate
 
         target_lang = _detect_language(goal)
         print(f"[Executor] 🌐 Translating to: {target_lang}")
@@ -163,88 +147,117 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
             f"- Output ONLY the translated text, nothing else\n\n"
             f"Text to translate:\n{content[:4000]}"
         )
-        response = model.generate_content(prompt)
-        translated = response.text.strip()
+        translated = gemini_generate(prompt).strip()
         print(f"[Executor] ✅ Translation done ({target_lang})")
         return translated
     except Exception as e:
         print(f"[Executor] ⚠️ Translation failed: {e}")
         return content
 
+_TOOL_HANDLERS: dict = {}
+
+def _register(tool_name: str):
+    def decorator(func):
+        _TOOL_HANDLERS[tool_name] = func
+        return func
+    return decorator
+
+
 def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
+    handler = _TOOL_HANDLERS.get(tool)
+    if handler:
+        return handler(parameters, speak)
+    log.warning("Unknown tool '%s' — falling back to generated_code", tool)
+    return _run_generated_code(f"Accomplish this task: {parameters}", speak=speak)
 
-    if tool == "open_app":
-        from actions.open_app import open_app
-        return open_app(parameters=parameters, player=None) or "Done."
 
-    elif tool == "web_search":
-        from actions.web_search import web_search
-        return web_search(parameters=parameters, player=None) or "Done."
-    elif tool == "game_updater":
-        from actions.game_updater import game_updater
-        return game_updater(parameters=parameters, player=None, speak=speak) or "Done."
-    elif tool == "browser_control":
-        from actions.browser_control import browser_control
-        return browser_control(parameters=parameters, player=None) or "Done."
+@_register("open_app")
+def _tool_open_app(params, speak):
+    from actions.open_app import open_app
+    return open_app(parameters=params, player=None) or "Done."
 
-    elif tool == "file_controller":
-        from actions.file_controller import file_controller
-        return file_controller(parameters=parameters, player=None) or "Done."
+@_register("web_search")
+def _tool_web_search(params, speak):
+    from actions.web_search import web_search
+    return web_search(parameters=params, player=None) or "Done."
 
-    elif tool == "code_helper":
-        from actions.code_helper import code_helper
-        return code_helper(parameters=parameters, player=None, speak=speak) or "Done."
+@_register("game_updater")
+def _tool_game_updater(params, speak):
+    from actions.game_updater import game_updater
+    return game_updater(parameters=params, player=None, speak=speak) or "Done."
 
-    elif tool == "dev_agent":
-        from actions.dev_agent import dev_agent
-        return dev_agent(parameters=parameters, player=None, speak=speak) or "Done."
+@_register("browser_control")
+def _tool_browser_control(params, speak):
+    from actions.browser_control import browser_control
+    return browser_control(parameters=params, player=None) or "Done."
 
-    elif tool == "screen_process":
-        from actions.screen_processor import screen_process
-        screen_process(parameters=parameters, player=None)
-        return "Screen captured and analyzed."
+@_register("file_controller")
+def _tool_file_controller(params, speak):
+    from actions.file_controller import file_controller
+    return file_controller(parameters=params, player=None) or "Done."
 
-    elif tool == "send_message":
-        from actions.send_message import send_message
-        return send_message(parameters=parameters, player=None) or "Done."
+@_register("code_helper")
+def _tool_code_helper(params, speak):
+    from actions.code_helper import code_helper
+    return code_helper(parameters=params, player=None, speak=speak) or "Done."
 
-    elif tool == "reminder":
-        from actions.reminder import reminder
-        return reminder(parameters=parameters, player=None) or "Done."
+@_register("dev_agent")
+def _tool_dev_agent(params, speak):
+    from actions.dev_agent import dev_agent
+    return dev_agent(parameters=params, player=None, speak=speak) or "Done."
 
-    elif tool == "youtube_video":
-        from actions.youtube_video import youtube_video
-        return youtube_video(parameters=parameters, player=None) or "Done."
+@_register("screen_process")
+def _tool_screen_process(params, speak):
+    from actions.screen_processor import screen_process
+    screen_process(parameters=params, player=None)
+    return "Screen captured and analyzed."
 
-    elif tool == "weather_report":
-        from actions.weather_report import weather_action
-        return weather_action(parameters=parameters, player=None) or "Done."
+@_register("send_message")
+def _tool_send_message(params, speak):
+    from actions.send_message import send_message
+    return send_message(parameters=params, player=None) or "Done."
 
-    elif tool == "computer_settings":
-        from actions.computer_settings import computer_settings
-        return computer_settings(parameters=parameters, player=None) or "Done."
+@_register("reminder")
+def _tool_reminder(params, speak):
+    from actions.reminder import reminder
+    return reminder(parameters=params, player=None) or "Done."
 
-    elif tool == "desktop_control":
-        from actions.desktop import desktop_control
-        return desktop_control(parameters=parameters, player=None) or "Done."
+@_register("youtube_video")
+def _tool_youtube_video(params, speak):
+    from actions.youtube_video import youtube_video
+    return youtube_video(parameters=params, player=None) or "Done."
 
-    elif tool == "computer_control":
-        from actions.computer_control import computer_control
-        return computer_control(parameters=parameters, player=None) or "Done."
+@_register("weather_report")
+def _tool_weather_report(params, speak):
+    from actions.weather_report import weather_action
+    return weather_action(parameters=params, player=None) or "Done."
 
-    elif tool == "generated_code":
-        description = parameters.get("description", "")
-        if not description:
-            raise ValueError("generated_code requires a 'description' parameter.")
-        return _run_generated_code(description, speak=speak)
+@_register("computer_settings")
+def _tool_computer_settings(params, speak):
+    from actions.computer_settings import computer_settings
+    return computer_settings(parameters=params, player=None) or "Done."
 
-    elif tool == "flight_finder":
-        from actions.flight_finder import flight_finder
-        return flight_finder(parameters=parameters, player=None, speak=speak) or "Done."
+@_register("desktop_control")
+def _tool_desktop_control(params, speak):
+    from actions.desktop import desktop_control
+    return desktop_control(parameters=params, player=None) or "Done."
 
-    else:
-        print(f"[Executor] ⚠️ Unknown tool '{tool}' — falling back to generated_code")
-        return _run_generated_code(f"Accomplish this task: {parameters}", speak=speak)
+@_register("computer_control")
+def _tool_computer_control(params, speak):
+    from actions.computer_control import computer_control
+    return computer_control(parameters=params, player=None) or "Done."
+
+@_register("generated_code")
+def _tool_generated_code(params, speak):
+    description = params.get("description", "")
+    if not description:
+        raise ValueError("generated_code requires a 'description' parameter.")
+    return _run_generated_code(description, speak=speak)
+
+@_register("flight_finder")
+def _tool_flight_finder(params, speak):
+    from actions.flight_finder import flight_finder
+    return flight_finder(parameters=params, player=None, speak=speak) or "Done."
 
 class AgentExecutor:
 
@@ -268,7 +281,6 @@ class AgentExecutor:
 
             if not steps:
                 msg = "I couldn't create a valid plan for this task, sir."
-                if speak: speak(msg)
                 return msg
 
             success      = True
@@ -277,7 +289,6 @@ class AgentExecutor:
 
             for step in steps:
                 if cancel_flag and cancel_flag.is_set():
-                    if speak: speak("Task cancelled, sir.")
                     return "Task cancelled."
 
                 step_num = step.get("step", "?")
@@ -327,7 +338,6 @@ class AgentExecutor:
 
                         elif decision == ErrorDecision.ABORT:
                             msg = f"Task aborted, sir. {recovery.get('reason', '')}"
-                            if speak: speak(msg)
                             return msg
 
                         else: 
@@ -335,7 +345,7 @@ class AgentExecutor:
                             if fix_suggestion and tool != "generated_code":
                                 try:
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
-                                    if speak: speak("Trying an alternative approach, sir.")
+                                    pass
                                     res = _call_tool(
                                         fixed_step["tool"],
                                         fixed_step["parameters"],
@@ -366,10 +376,7 @@ class AgentExecutor:
 
             if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
                 msg = f"Task failed after {replan_attempts} replan attempts, sir."
-                if speak: speak(msg)
                 return msg
-
-            if speak: speak("Adjusting my approach, sir.")
 
             replan_attempts += 1
             plan = replan(goal, completed_steps, failed_step, failed_error)
@@ -377,9 +384,7 @@ class AgentExecutor:
     def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
         fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=_get_api_key())
-            model     = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
+            from core.config import gemini_generate
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
@@ -387,10 +392,7 @@ class AgentExecutor:
                 "Write a single natural sentence summarizing what was accomplished. "
                 "Address the user as 'sir'. Be direct and positive."
             )
-            response = model.generate_content(prompt)
-            summary  = response.text.strip()
-            if speak: speak(summary)
+            summary = gemini_generate(prompt, model=MODEL_LITE).strip()
             return summary
         except Exception:
-            if speak: speak(fallback)
             return fallback
